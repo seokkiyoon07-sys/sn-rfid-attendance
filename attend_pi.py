@@ -17,6 +17,7 @@ SOUND_CHECKOUT = "/home/sn-rfid-attendance/sounds/checkout.wav"
 USE_SPEAKER = True
 SYNC_INTERVAL = 30
 MAPPING_REFRESH_INTERVAL = 300
+MAX_SHIFT_HOURS = 16
 
 staff_cache = {}
 sheets_service = None
@@ -119,12 +120,25 @@ def init_db():
     conn.commit()
     conn.close()
 
-def get_today_count(uid):
-    today = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).strftime("%Y-%m-%d")
+def get_last_event(uid):
+    """마지막 이벤트 조회. (event_type, ts_iso) 또는 None 반환"""
     conn = sqlite3.connect(SQLITE_PATH)
-    count = conn.execute("SELECT COUNT(*) FROM events WHERE card_uid=? AND ts_iso LIKE ?", (uid, f"{today}%")).fetchone()[0]
+    row = conn.execute("SELECT event_type, ts_iso FROM events WHERE card_uid=? ORDER BY ts_iso DESC LIMIT 1", (uid,)).fetchone()
     conn.close()
-    return count
+    return row
+
+def should_check_in(uid):
+    """출근 여부 판단: 마지막 이벤트가 없거나, CHECK_OUT이거나, 12시간 초과면 출근"""
+    last = get_last_event(uid)
+    if not last:
+        return True
+    event_type, ts_iso = last
+    if event_type == "CHECK_OUT":
+        return True
+    last_time = datetime.datetime.fromisoformat(ts_iso)
+    now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
+    hours_diff = (now - last_time).total_seconds() / 3600
+    return hours_diff > MAX_SHIFT_HOURS
 
 def insert_event(uid, sid, etype):
     ts = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).isoformat()
@@ -182,8 +196,7 @@ def read_loop():
                     name = info["name"] if info else "미등록"
                     webhook_url = info["webhook_url"] if info else ""
                     team_webhook_url = info["team_webhook_url"] if info else ""
-                    cnt = get_today_count(uid)
-                    if cnt % 2 == 0:
+                    if should_check_in(uid):
                         print(f"[CHECK_IN] {uid} {name}")
                         play_sound(SOUND_CHECKIN)
                         eid, ts = insert_event(uid, sid, "CHECK_IN")
